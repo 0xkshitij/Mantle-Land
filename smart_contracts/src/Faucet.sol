@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {ERC1155TokenReceiver} from "solmate/tokens/ERC1155.sol";
-import "openzeppelin/token/ERC1155/IERC1155.sol";
-import "openzeppelin/metatx/ERC2771Context.sol";
+import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
+import "@openzeppelin/contracts/token/ERC1155/IERC1155Receiver.sol"; // Add this import for IERC1155Receiver
+import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 
 contract Faucet is ERC2771Context {
     constructor(address trustedForwarder) ERC2771Context(trustedForwarder) {}
 
     function getToken(address tokenAddress, uint256 tokenId) public {
+        // Transfer 10 tokens of the specified tokenId to the caller
         IERC1155(tokenAddress).safeTransferFrom(
             address(this),
             _msgSender(),
@@ -18,6 +19,7 @@ contract Faucet is ERC2771Context {
         );
     }
 
+    // Required by ERC1155 standard to handle token reception
     function onERC1155Received(
         address,
         address,
@@ -25,9 +27,10 @@ contract Faucet is ERC2771Context {
         uint256,
         bytes memory
     ) public virtual returns (bytes4) {
-        return ERC1155TokenReceiver.onERC1155Received.selector;
+        return IERC1155Receiver.onERC1155Received.selector;
     }
 
+    // Required by ERC1155 standard to handle batch token reception
     function onERC1155BatchReceived(
         address,
         address,
@@ -35,6 +38,6 @@ contract Faucet is ERC2771Context {
         uint256[] memory,
         bytes memory
     ) public virtual returns (bytes4) {
-        return ERC1155TokenReceiver.onERC1155BatchReceived.selector;
+        return IERC1155Receiver.onERC1155BatchReceived.selector;
     }
 }
