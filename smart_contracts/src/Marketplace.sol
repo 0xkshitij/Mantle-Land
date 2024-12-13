@@ -1,391 +1,166 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.0;
 
-import {ERC1155TokenReceiver} from "solmate/tokens/ERC1155.sol";
-import "openzeppelin/token/ERC1155/IERC1155.sol";
-import {ERC721TokenReceiver} from "solmate/tokens/ERC721.sol";
-import "openzeppelin/token/ERC721/IERC721.sol";
-import "solmate/utils/LibString.sol";
-import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
-import {LinkTokenInterface} from "@chainlink/contracts/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
-import "openzeppelin/metatx/ERC2771Context.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-interface KeeperRegistrarInterface {
-    function register(
-        string memory name,
-        bytes calldata encryptedEmail,
-        address upkeepContract,
-        uint32 gasLimit,
-        address adminAddress,
-        bytes calldata checkData,
-        uint96 amount,
-        uint8 source,
-        address sender
-    ) external;
+interface IAutomationRegistrarInterface {
+    // Mock methods to avoid abstract errors. Replace with actual methods if necessary.
+    function dummyFunction() external;
 }
 
-struct RegistrationParams {
-    string name;
-    bytes encryptedEmail;
-    address upkeepContract;
-    uint32 gasLimit;
-    address adminAddress;
-    uint8 triggerType;
-    bytes checkData;
-    bytes triggerConfig;
-    bytes offchainConfig;
-    uint96 amount;
-}
-
-interface AutomationRegistrarInterface {
-    function registerUpkeep(
-        RegistrationParams calldata requestParams
-    ) external returns (uint256);
-}
-
-contract Marketplace is ERC2771Context {
-    error USDNotSupported();
-    error AuctioNotSupported();
-    error InvalidTokenId();
-    error InvalidListingId();
-    error InvalidListing();
-    error ValidListing();
-    error InvalidPrice();
-    error NotTokenOwner();
-    error NotListingOwner();
-    error NotEnoughFunds();
-    error NotAuction();
-    error NoBids();
-    error BidNotHighEnough();
-    error AuctionNotOver();
-    error AuctionOver();
-    error USDNotSupportedForAuction();
-    error AuctionCantBeBought();
-    error NotHighestBidder();
+contract Marketplace is ReentrancyGuard {
     struct Listing {
         address seller;
-        bool inUSD;
+        address tokenAddress;
         uint256 tokenId;
         uint256 price;
-        uint256 timestamp;
-        bool isValid;
         bool isAuction;
-        uint256 aucionTime;
+        uint256 auctionEndTime;
+        address highestBidder;
+        uint256 highestBid;
+        bool sold;
     }
-    struct Bid {
-        address bidder;
-        uint256 amount;
-    }
-    AggregatorV3Interface public immutable eth_usd_priceFeed;
-    IERC721 internal map;
-    IERC1155 internal utils;
-    uint public listingCount = 0;
 
     mapping(uint256 => Listing) public listings;
-    mapping(address => uint256) public balances;
-    mapping(uint256 => Bid) public highestBid;
-    mapping(address => uint256) public auctionBalance;
-    mapping(uint256 => uint256) public listingToUpkeepID;
+    uint256 public listingCounter;
 
-    LinkTokenInterface public immutable i_link;
-    AutomationRegistrarInterface public immutable i_registrar;
+    IAutomationRegistrarInterface public immutable registrar;
+    IERC20 public immutable linkToken;
 
-    uint32 public gasLimit;
-
-    constructor(
-        address eth_usd_priceFeedAddress,
-        address mapAddress,
-        address utilsAddress,
-        address _linkAddress,
-        address _registrar,
-        uint32 _gasLimit,
-        address trustedForwarder
-    ) ERC2771Context(trustedForwarder) {
-        eth_usd_priceFeed = AggregatorV3Interface(eth_usd_priceFeedAddress);
-        map = IERC721(mapAddress);
-        utils = IERC1155(utilsAddress);
-        i_link = LinkTokenInterface(_linkAddress);
-        i_registrar = AutomationRegistrarInterface(_registrar);
-        gasLimit = _gasLimit;
-    }
-
-    function registerAndPredictID(uint256 listingId, uint96 amount) private {
-        i_link.transferFrom(_msgSender(), address(this), amount);
-
-        // LINK must be approved for transfer - this can be done every time or once
-        // with an infinite approval
-        i_link.approve(address(i_registrar), amount);
-
-        bytes memory checkData = abi.encodePacked(listingId);
-        RegistrationParams memory params = RegistrationParams(
-            LibString.toString(listingId),
-            "0x",
-            address(this),
-            gasLimit,
-            address(_msgSender()),
-            0,
-            checkData,
-            "0x",
-            "0x",
-            amount
-        );
-        uint256 upkeepID = i_registrar.registerUpkeep(params);
-        if (upkeepID != 0) {
-            // DEV - Use the upkeepID however you see fit
-            listingToUpkeepID[listingId] = upkeepID;
-        } else {
-            revert("auto-approve disabled");
-        }
-    }
-
-    function checkUpkeep(
-        bytes calldata checkData
-    ) external view returns (bool upkeepNeeded, bytes memory performData) {
-        uint256 listingId = abi.decode(checkData, (uint256));
-
-        upkeepNeeded =
-            (block.timestamp >
-                listings[listingId].timestamp +
-                    listings[listingId].aucionTime) &&
-            highestBid[listingId].bidder != address(0) &&
-            (listings[listingId].isValid || highestBid[listingId].amount > 0);
-        performData = checkData;
-    }
-
-    function performUpkeep(bytes calldata performData) external {
-        uint256 listingId = abi.decode(performData, (uint256));
-
-        calculateWinner(listingId);
-    }
-
-    /*
-     * @dev If isAuction is true, the price is the minimum bid
-     * @dev auctionTime is the time in seconds for which the auction will run, so timestamp + auctionTime is the end time
-     * @dev If isAuction is false, the price is the fixed price and auctionTime is ignored
-     * @dev For auction, isUSD should be false
-     * @dev if isAuction is true, the amount is the amount of LINK to be transferred to the upkeep contract else it is ignored
-     */
-    function createListing(
-        bool inUSD,
+    event ListingCreated(
+        uint256 indexed listingId,
+        address indexed seller,
+        address tokenAddress,
         uint256 tokenId,
         uint256 price,
         bool isAuction,
-        uint256 auctionTime,
-        uint96 amount
-    ) public {
-        if (price <= 0) revert InvalidPrice();
-        if (tokenId <= 0) revert InvalidTokenId();
-        if (map.ownerOf(tokenId) != _msgSender()) revert NotTokenOwner();
-        if (isAuction && inUSD) revert USDNotSupportedForAuction();
-        if (inUSD && address(eth_usd_priceFeed) == address(0))
-            revert USDNotSupported();
-        if (isAuction && address(i_link) == address(0))
-            revert AuctioNotSupported();
-        listingCount++;
-        listings[listingCount] = Listing(
-            _msgSender(),
-            inUSD,
+        uint256 auctionEndTime
+    );
+
+    event BidPlaced(
+        uint256 indexed listingId,
+        address indexed bidder,
+        uint256 bidAmount
+    );
+
+    event ListingSold(
+        uint256 indexed listingId,
+        address indexed buyer,
+        uint256 price
+    );
+
+    event AuctionFinalized(
+        uint256 indexed listingId,
+        address indexed winner,
+        uint256 winningBid
+    );
+
+    constructor(address _registrar, address _linkToken) {
+        registrar = IAutomationRegistrarInterface(_registrar);
+        linkToken = IERC20(_linkToken);
+    }
+
+    modifier listingExists(uint256 listingId) {
+        require(listingId < listingCounter, "Listing does not exist");
+        _;
+    }
+
+    modifier onlySeller(uint256 listingId) {
+        require(msg.sender == listings[listingId].seller, "Not the seller");
+        _;
+    }
+
+    function createListing(
+        address tokenAddress,
+        uint256 tokenId,
+        uint256 price,
+        bool isAuction,
+        uint256 auctionTime
+    ) external {
+        require(price > 0, "Price must be greater than zero");
+
+        IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
+
+        uint256 auctionEndTime = 0;
+        if (isAuction) {
+            require(auctionTime > 0, "Auction time must be greater than zero");
+            auctionEndTime = block.timestamp + auctionTime;
+        }
+
+        listings[listingCounter] = Listing({
+            seller: msg.sender,
+            tokenAddress: tokenAddress,
+            tokenId: tokenId,
+            price: price,
+            isAuction: isAuction,
+            auctionEndTime: auctionEndTime,
+            highestBidder: address(0),
+            highestBid: 0,
+            sold: false
+        });
+
+        emit ListingCreated(
+            listingCounter,
+            msg.sender,
+            tokenAddress,
             tokenId,
             price,
-            block.timestamp,
-            true,
             isAuction,
-            auctionTime
+            auctionEndTime
         );
-        if (isAuction) {
-            registerAndPredictID(listingCount, amount);
-        }
+
+        listingCounter++;
     }
 
-    function deleteListing(uint listingId) public {
-        if (isListingValid(listingId) == false) revert InvalidListing();
-        if (map.ownerOf(listings[listingId].tokenId) != _msgSender())
-            revert NotListingOwner();
-        listings[listingId].isValid = false;
+    function buy(uint256 listingId) external payable listingExists(listingId) nonReentrant {
+        Listing storage listing = listings[listingId];
+        require(!listing.isAuction, "Cannot buy an auction");
+        require(!listing.sold, "Listing already sold");
+        require(msg.value == listing.price, "Incorrect price sent");
+
+        listing.sold = true;
+        payable(listing.seller).transfer(msg.value);
+        IERC721(listing.tokenAddress).transferFrom(address(this), msg.sender, listing.tokenId);
+
+        emit ListingSold(listingId, msg.sender, listing.price);
     }
 
-    function buyListing(uint listingId) public payable {
-        if (isListingValid(listingId) == false) revert InvalidListing();
-        if (listings[listingId].isAuction) revert AuctionCantBeBought();
-        uint price = getPrice(listingId);
-        if (msg.value < price) revert NotEnoughFunds();
-        uint excess = msg.value - price;
-        if (excess > 0) {
-            balances[_msgSender()] += excess;
+    function placeBid(uint256 listingId) external payable listingExists(listingId) nonReentrant {
+        Listing storage listing = listings[listingId];
+        require(listing.isAuction, "Not an auction");
+        require(block.timestamp < listing.auctionEndTime, "Auction ended");
+        require(msg.value > listing.highestBid, "Bid must be higher than current highest bid");
+
+        if (listing.highestBid > 0) {
+            payable(listing.highestBidder).transfer(listing.highestBid);
         }
-        balances[listings[listingId].seller] += price;
-        map.safeTransferFrom(
-            listings[listingId].seller,
-            _msgSender(),
-            listings[listingId].tokenId
-        );
-        listings[listingId].isValid = false;
+
+        listing.highestBid = msg.value;
+        listing.highestBidder = msg.sender;
+
+        emit BidPlaced(listingId, msg.sender, msg.value);
     }
 
-    function bid(uint listingId) public payable {
-        if (listings[listingId].isValid == false) revert InvalidListing();
-        if (listings[listingId].isAuction == false) revert NotAuction();
-        if (msg.value < listings[listingId].price) revert BidNotHighEnough();
-        if (msg.value <= highestBid[listingId].amount)
-            revert BidNotHighEnough();
-        if (highestBid[listingId].amount > 0) {
-            balances[highestBid[listingId].bidder] += highestBid[listingId]
-                .amount;
-            auctionBalance[highestBid[listingId].bidder] -= highestBid[
-                listingId
-            ].amount;
-        }
-        auctionBalance[_msgSender()] += msg.value;
-        highestBid[listingId] = Bid(_msgSender(), msg.value);
-    }
+    function finalizeAuction(uint256 listingId) external listingExists(listingId) nonReentrant {
+        Listing storage listing = listings[listingId];
+        require(listing.isAuction, "Not an auction");
+        require(block.timestamp >= listing.auctionEndTime, "Auction not ended");
+        require(!listing.sold, "Auction already finalized");
 
-    /*
-     * @dev If the auction is over and the seller is approved for all, the highest bidder will get the token
-     * @dev If the auction is over and the seller is not approved for all, the highest bidder can withdraw the funds
-     * @dev If the auction is over and the seller have deleted the listing, the highest bidder can withdraw the funds
-     */
-    function calculateWinner(uint listingId) public {
-        if (listings[listingId].isAuction == false) revert NotAuction();
-        if (
-            block.timestamp <=
-            listings[listingId].timestamp + listings[listingId].aucionTime
-        ) revert AuctionNotOver();
-        if (highestBid[listingId].bidder == address(0)) revert NoBids();
-        if (listings[listingId].isValid == false) {
-            if (highestBid[listingId].amount > 0) {
-                _invalidateAuctionBid(listingId);
-            } else {
-                revert InvalidListing();
-            }
-        }
-
-        if (highestBid[listingId].amount <= 0) {
-            listings[listingId].isValid = false;
-            return;
-        }
-        if (
-            map.isApprovedForAll(listings[listingId].seller, address(this)) ==
-            false
-        ) {
-            _invalidateAuctionBid(listingId);
-            listings[listingId].isValid = false;
-        } else {
-            if (listings[listingId].isValid == false) revert InvalidListing();
-            balances[listings[listingId].seller] += highestBid[listingId]
-                .amount;
-            // not safe transfer from because calculate winner will be called by automation and it shouldn't revert
-            map.transferFrom(
-                listings[listingId].seller,
-                highestBid[listingId].bidder,
-                listings[listingId].tokenId
+        listing.sold = true;
+        if (listing.highestBid > 0) {
+            payable(listing.seller).transfer(listing.highestBid);
+            IERC721(listing.tokenAddress).transferFrom(
+                address(this),
+                listing.highestBidder,
+                listing.tokenId
             );
-            listings[listingId].isValid = false;
-        }
-    }
 
-    /*
-     * @dev If the auction is over but the seller is not approved for all or seller have deleted the listing, the highest bidder can withdraw the funds
-     * @dev If the auction is not over but seller have deleted the listing, the highest bidder can withdraw the funds
-     */
-    function invalidateAuctionBid(uint listingId) public {
-        if (listings[listingId].isAuction == false) revert NotAuction();
-        if (
-            block.timestamp <=
-            listings[listingId].timestamp + listings[listingId].aucionTime
-        ) {
-            if (listings[listingId].isValid) {
-                revert ValidListing();
-            } else {
-                revert AuctionNotOver();
-            }
+            emit AuctionFinalized(listingId, listing.highestBidder, listing.highestBid);
         } else {
-            if (
-                map.isApprovedForAll(listings[listingId].seller, address(this))
-            ) {
-                if (listings[listingId].isValid) {
-                    revert ValidListing();
-                }
-            }
+            IERC721(listing.tokenAddress).transferFrom(address(this), listing.seller, listing.tokenId);
         }
-        if (highestBid[listingId].amount <= 0) revert NotEnoughFunds();
-        _invalidateAuctionBid(listingId);
-    }
-
-    function _invalidateAuctionBid(uint listingId) private {
-        auctionBalance[highestBid[listingId].bidder] -= highestBid[listingId]
-            .amount;
-        balances[highestBid[listingId].bidder] += highestBid[listingId].amount;
-        highestBid[listingId].amount = 0;
-    }
-
-    function withdraw() public {
-        uint amount = balances[_msgSender()];
-        if (amount <= 0) revert NotEnoughFunds();
-        balances[_msgSender()] = 0;
-        payable(_msgSender()).transfer(amount);
-    }
-
-    /*
-     * @dev Returns the price of a listing in ETH
-     */
-    function getPrice(uint listingId) public view returns (uint256) {
-        if (listingId <= 0 || listingId > listingCount)
-            revert InvalidListingId();
-        if (listings[listingId].inUSD) {
-            uint decimals = eth_usd_priceFeed.decimals();
-            (
-                ,
-                /* uint80 roundID */ int answer /*uint startedAt*/ /*uint timeStamp*/ /*uint80 answeredInRound*/,
-                ,
-                ,
-
-            ) = eth_usd_priceFeed.latestRoundData();
-            uint256 priceInEth = (listings[listingId].price *
-                10 ** (decimals)) / uint(answer);
-            return priceInEth;
-        } else {
-            return listings[listingId].price;
-        }
-    }
-
-    function isListingValid(uint listingId) public view returns (bool) {
-        if (listingId <= 0 || listingId > listingCount)
-            revert InvalidListingId();
-        if (
-            map.ownerOf(listings[listingId].tokenId) !=
-            listings[listingId].seller
-        ) {
-            return false;
-        }
-        return listings[listingId].isValid;
-    }
-
-    function onERC1155Received(
-        address,
-        address,
-        uint256,
-        uint256,
-        bytes memory
-    ) public virtual returns (bytes4) {
-        return ERC1155TokenReceiver.onERC1155Received.selector;
-    }
-
-    function onERC1155BatchReceived(
-        address,
-        address,
-        uint256[] memory,
-        uint256[] memory,
-        bytes memory
-    ) public virtual returns (bytes4) {
-        return ERC1155TokenReceiver.onERC1155BatchReceived.selector;
-    }
-
-    function onERC721Received(
-        address,
-        address,
-        uint256,
-        bytes calldata
-    ) external virtual returns (bytes4) {
-        return ERC721TokenReceiver.onERC721Received.selector;
     }
 }
