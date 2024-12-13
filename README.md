@@ -129,7 +129,6 @@ Mantle-Land was built using the following technologies and tools:
 - **Map Size**: The map size is determined in the smart contract, allowing the deployment of multiple maps with different sizes. The current deployment consists of a map with a size of 15 by 15 tiles, where each land is a 5 by 5 tile.
 - **Item Minting**: Three items are minted in the Utils contract: road, house, and special item.
 - **Wallet Integration**: Users can connect their wallets, such as **Metamask**, **Coinbase**, and **WalletConnect**, to interact with the metaverse.
-- **Gasless Transactions**: All smart contracts implement **ERC2771Context**, enabling users to perform **gasless transactions** when the relayer is funded.
 - **Sprucekit** was used to let User Save/Load private designs
 - **ENS** was used to resolve custom name for users in marketplace
 
@@ -144,8 +143,7 @@ During the development of Mantle-Land, we encountered several challenges, includ
 - Developing a user-friendly interface and seamless wallet integration for a smooth user experience.
 - Sprucekit sdk was mainly for Reactjs project, so to pass message between game build for wasm to Reactjs was challenging.
 - Unity output the build game in WebGL, so the communication between Webgl and Reactjs was challenging.
-- Implementing gasless transactions using ERC2771Context ( and Moonbeam's Call Permit Precompile for Moonbase Alpha ) and ensuring that users can interact with the metaverse without incurring gas fees.
-- Deployment of ZKSync Sepolia was challenging as it was first time we were deploying on ZKSync.
+
 
 ## Accomplishments That We're Proud Of
 
@@ -154,7 +152,6 @@ Throughout the development process, we achieved several accomplishments that we'
 - Successfully integrating the Unity game engine with the Blockchain and smart contracts.
 - Creating a metaverse where users can own virtual land and customize it with various items.
 - Implementing a marketplace where users can buy and sell land securely through direct listings and auctions.
-- Enabling gasless transactions for users by implementing ERC2771Context in all smart contracts.
 - Conducting comprehensive testing, including fuzz testing, to ensure the stability and reliability of the application.
 
 ## What We Learned
