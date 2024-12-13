@@ -1,5 +1,13 @@
 Mantle-Land is a metaverse project. It provides users with the ability to own virtual land within a map, place items on the land they own, and even sell the land to other users. The land is represented as ERC721 tokens, while the items are represented as ERC1155 tokens. All interactions within the metaverse are secured by smart contracts.
 
+## Deployed Smart Contracts(Mantle Sepolia Testnet 5003)
+-Faucet.sol 0xC8F141576341eecBB0296b66AEb222BBE4beCE04
+-Forwarder.sol 0xdd9fD329E50c36F3638dCb81387a73643E557F0b
+-Map.sol 0xf32d43021bC6ed66047D70de9610b6FF4D12645C
+-Marketplace.sol 0xb6b51478827079e9BEd6569b1d965e6fe5db1472
+-
+
+
 ## Teams
 
 
